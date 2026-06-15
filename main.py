@@ -3,6 +3,7 @@ from pydantic import BaseModel
 from typing import List, Optional
 from openai import OpenAI
 import uuid
+import os
 
 app = FastAPI(title="AI Classroom API")
 
