@@ -11,8 +11,7 @@ app = FastAPI(title="AI Classroom API")
 # ==========================
 
 client = OpenAI(
-    api_key="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"
-)
+    api_key=os.getenv("OPENAI_API_KEY"))
 
 # ==========================
 # IN-MEMORY STORAGE
