@@ -1,18 +1,35 @@
+
 from fastapi import FastAPI, HTTPException
+from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel
 from typing import List, Optional
 from openai import OpenAI
-import uuid
 import os
+import uuid
+import json
+import re
 
 app = FastAPI(title="AI Classroom API")
+
+# ==========================
+# CORS
+# ==========================
+
+app.add_middleware(
+    CORSMiddleware,
+    allow_origins=["*"],
+    allow_credentials=True,
+    allow_methods=["*"],
+    allow_headers=["*"],
+)
 
 # ==========================
 # OPENAI CONFIG
 # ==========================
 
 client = OpenAI(
-    api_key=os.getenv("OPENAI_API_KEY"))
+    api_key=os.getenv("OPENAI_API_KEY")
+)
 
 # ==========================
 # IN-MEMORY STORAGE
@@ -48,7 +65,7 @@ class SubmitQuizRequest(BaseModel):
     score: int
 
 # ==========================
-# GENERATE QUESTIONS
+# QUESTION GENERATION
 # ==========================
 
 @app.post("/generate-questions")
@@ -58,53 +75,71 @@ async def generate_questions(req: QuestionRequest):
 Generate {req.count} {req.questionType} questions.
 
 Topic: {req.topic}
-
 Difficulty: {req.difficulty}
-
 Bloom Level: {req.bloomLevel}
-
 Language: {req.language}
 
 Question Types:
-mcq
-truefalse
-fillblanks
-shortanswer
-essay
+- mcq
+- truefalse
+- fillblanks
+- shortanswer
+- essay
 
 Return ONLY valid JSON.
 
 Format:
 
-{{
-  "questions":[
-    {{
-      "question":"",
-      "options":["","","",""],
-      "answer":"",
-      "explanation":""
-    }}
-  ]
-}}
+[
+  {{
+    "text": "Question here?",
+    "optA": "Option A",
+    "optB": "Option B",
+    "optC": "Option C",
+    "optD": "Option D",
+    "correct": "A",
+    "explanation": "Why A is correct"
+  }}
+]
 """
 
     response = client.chat.completions.create(
-        model="gpt-4.1-mini",
+        model="gpt-4o-mini",
         messages=[
             {
-                "role":"user",
-                "content":prompt
+                "role": "user",
+                "content": prompt
             }
         ]
     )
 
+    raw = response.choices[0].message.content.strip()
+
+    raw = re.sub(r"^```json\s*", "", raw)
+    raw = re.sub(r"^```\s*", "", raw)
+    raw = re.sub(r"\s*```$", "", raw)
+
+    try:
+        questions = json.loads(raw)
+    except Exception:
+        return {
+            "error": "AI returned invalid JSON",
+            "raw": raw
+        }
+
+    for i, q in enumerate(questions):
+        q["_id"] = f"ai_{i}"
+        q["timer"] = "30"
+        q["marks"] = "2"
+
     return {
         "topic": req.topic,
-        "generated": response.choices[0].message.content
+        "questionType": req.questionType,
+        "questions": questions
     }
 
 # ==========================
-# GENERATE MCQ
+# QUESTION TYPE SHORTCUTS
 # ==========================
 
 @app.post("/generate-mcq")
@@ -112,36 +147,20 @@ async def generate_mcq(req: QuestionRequest):
     req.questionType = "mcq"
     return await generate_questions(req)
 
-# ==========================
-# TRUE FALSE
-# ==========================
-
 @app.post("/generate-truefalse")
-async def generate_tf(req: QuestionRequest):
+async def generate_truefalse(req: QuestionRequest):
     req.questionType = "truefalse"
     return await generate_questions(req)
 
-# ==========================
-# FILL BLANKS
-# ==========================
-
 @app.post("/generate-fillblanks")
-async def generate_fill(req: QuestionRequest):
+async def generate_fillblanks(req: QuestionRequest):
     req.questionType = "fillblanks"
     return await generate_questions(req)
 
-# ==========================
-# SHORT ANSWER
-# ==========================
-
 @app.post("/generate-shortanswer")
-async def generate_short(req: QuestionRequest):
+async def generate_shortanswer(req: QuestionRequest):
     req.questionType = "shortanswer"
     return await generate_questions(req)
-
-# ==========================
-# ESSAY
-# ==========================
 
 @app.post("/generate-essay")
 async def generate_essay(req: QuestionRequest):
@@ -156,7 +175,6 @@ async def generate_essay(req: QuestionRequest):
 async def create_quiz(req: QuizCreateRequest):
 
     session_id = str(uuid.uuid4())
-
     join_code = str(uuid.uuid4())[:6].upper()
 
     quizzes[join_code] = {
@@ -190,7 +208,7 @@ async def join_quiz(req: JoinQuizRequest):
     )
 
     return {
-        "message":"Joined Successfully",
+        "message": "Joined Successfully",
         "quiz": quizzes[req.joinCode]
     }
 
@@ -212,11 +230,11 @@ async def submit_quiz(req: SubmitQuizRequest):
     )
 
     return {
-        "message":"Submission Saved"
+        "message": "Submission Saved"
     }
 
 # ==========================
-# RESULTS
+# QUIZ RESULTS
 # ==========================
 
 @app.get("/quiz-results/{session_id}")
@@ -238,42 +256,33 @@ async def analytics(session_id: str):
 
     if len(data) == 0:
         return {
-            "message":"No results"
+            "message": "No results"
         }
 
     scores = [x["score"] for x in data]
 
-    avg = sum(scores) / len(scores)
-
     return {
         "totalStudents": len(scores),
-        "averageScore": avg,
+        "averageScore": round(sum(scores) / len(scores), 2),
         "highestScore": max(scores),
         "lowestScore": min(scores)
     }
 
 # ==========================
-# VALIDATE QUESTIONS
+# QUESTION VALIDATION
 # ==========================
 
 @app.post("/validate-questions")
 async def validate_questions(payload: dict):
 
-    questions = payload.get(
-        "questions",
-        []
-    )
+    questions = payload.get("questions", [])
 
     unique_questions = set()
-
     duplicates = False
 
     for q in questions:
 
-        text = q.get(
-            "question",
-            ""
-        )
+        text = q.get("text") or q.get("question", "")
 
         if text in unique_questions:
             duplicates = True
@@ -282,7 +291,8 @@ async def validate_questions(payload: dict):
 
     return {
         "duplicatesFound": duplicates,
-        "qualityScore": 95
+        "qualityScore": 95,
+        "totalQuestions": len(questions)
     }
 
 # ==========================
@@ -293,6 +303,7 @@ async def validate_questions(payload: dict):
 async def root():
 
     return {
-        "status":"running",
-        "service":"AI Classroom API"
+        "status": "running",
+        "service": "AI Classroom API"
     }
+
